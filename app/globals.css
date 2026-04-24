@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-feature-settings: "kern" 1, "palt" 1;
+}
+
+html,
+body {
+  background: #f7f8fa;
+  color: #111318;
+  line-height: 1.7;
+  line-break: strict;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
