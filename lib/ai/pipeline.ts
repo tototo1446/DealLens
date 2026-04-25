@@ -1,7 +1,9 @@
+import { Type } from "@google/genai";
 import { genai, MODEL_FLASH } from "./gemini";
 import { TRANSCRIBE_INSTRUCTION } from "./prompts/transcribe";
 import { buildExtractionPrompt } from "./prompts/extract-categories";
 import { splitAudioMp3 } from "@/lib/ffmpeg/split-audio";
+import { CATEGORIES } from "@/config/categories";
 
 export type TranscriptSegment = {
   start: string;
@@ -354,11 +356,13 @@ export async function extractCategories(
       ],
       config: {
         responseMimeType: "application/json",
+        // responseSchema で構造を強制し、Flash が evidence_quote をだらだら
+        // 引用するのを防ぐ。max_length 等は Gemini Schema では強制できないので
+        // プロンプトの「最大80文字」指示に頼る。
+        responseSchema: buildExtractionResponseSchema(),
         temperature: 0.2,
-        // 14項目 × evidence_quote ~120文字 + value で十分な余裕。
-        maxOutputTokens: 32_000,
-        // 50万トークン級の transcript を Pro で処理すると thinking が暴れて
-        // 10分超ハングするため Flash に切り替え。Flash は thinking 0 にできる。
+        // 14項目 × evidence_quote が短くても余裕を持って Flash の上限に張る。
+        maxOutputTokens: 65_535,
         thinkingConfig: { thinkingBudget: 0 },
       },
     });
@@ -413,6 +417,54 @@ export async function extractCategories(
   };
 
   return { extracted: parsed.value.results ?? {}, diagnostics };
+}
+
+/**
+ * Gemini structured output 用 responseSchema を CATEGORIES から組み立てる。
+ * 各カテゴリーキーが {value, evidence_quote, confidence} のオブジェクトを持つ
+ * という構造を強制する。
+ */
+function buildExtractionResponseSchema() {
+  const itemSchema = {
+    type: Type.OBJECT,
+    properties: {
+      value: {
+        type: Type.STRING,
+        nullable: true,
+        description:
+          "抽出した値。発話されていない場合は null。string 以外の型 (boolean/number/enum) も文字列化して入れる",
+      },
+      evidence_quote: {
+        type: Type.STRING,
+        nullable: true,
+        description:
+          "根拠となる文字起こし内の発話の引用。最大80文字。長くなる場合は最も該当性が高い1発話のみを切り詰めて入れる",
+      },
+      confidence: {
+        type: Type.NUMBER,
+        nullable: true,
+        description: "0.0 〜 1.0 の自己評価",
+      },
+    },
+    required: ["value", "evidence_quote", "confidence"],
+  };
+
+  const properties: Record<string, typeof itemSchema> = {};
+  for (const c of CATEGORIES) {
+    properties[c.key] = itemSchema;
+  }
+
+  return {
+    type: Type.OBJECT,
+    properties: {
+      results: {
+        type: Type.OBJECT,
+        properties,
+        required: CATEGORIES.map((c) => c.key),
+      },
+    },
+    required: ["results"],
+  };
 }
 
 function safeParse<T>(text: string, fallback: T): T {
