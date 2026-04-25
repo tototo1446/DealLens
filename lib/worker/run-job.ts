@@ -7,9 +7,7 @@ import {
   checkCancellation,
   JobCancelledError,
 } from "@/lib/db/jobs";
-import { downloadToTempFile } from "@/lib/storage/blob";
 import { extractAudioMp3 } from "@/lib/ffmpeg/extract-audio";
-import { rm } from "node:fs/promises";
 import {
   extractCategories,
   transcribeAudioChunked,
@@ -23,28 +21,21 @@ export async function runJob(jobId: string): Promise<void> {
   const log = (message: string) => appendJobLog(jobId, message);
   const logWarn = (message: string) => appendJobLog(jobId, message, "warn");
 
-  // 大容量動画 (~数GB) は arrayBuffer() で読むとメモリ上限を超えるため、
-  // 一時ファイルにストリーミング保存してから ffmpeg にパス渡しする。
-  let dlDir: string | null = null;
-
   try {
     await log(`ジョブ開始 (source: ${job.source_type})`);
 
-    // 1. ダウンロード (ストリーミング → tmpfile)
+    // 1+2. ダウンロード省略 + 音声抽出
+    // ffmpeg に Blob URL を直接渡してネットワーク経由でストリーミング処理させる。
+    // /tmp に動画を一切置かないので、Vercel の /tmp 容量上限 (~1GB) を回避できる。
     await checkCancellation(jobId);
     await updateJob(jobId, { status: "downloading" });
-    await log(`動画の取得を開始: ${truncate(job.source_uri, 80)}`);
-    const tDl = Date.now();
-    const dl = await downloadToTempFile(job.source_uri);
-    dlDir = dl.dir;
-    await log(`動画の取得完了 (${formatMB(dl.bytes)}, ${elapsed(tDl)})`);
-
-    // 2. 音声抽出
-    await checkCancellation(jobId);
+    await log(`動画ソース: ${truncate(job.source_uri, 80)}`);
     await updateJob(jobId, { status: "transcoding" });
-    await log("ffmpegで音声(mp3)を抽出中…");
+    await log(
+      "ffmpegで音声(mp3)を抽出中… (URLストリーミング読み込み・ローカル保存なし)"
+    );
     const tAudio = Date.now();
-    const audio = await extractAudioMp3(dl.path);
+    const audio = await extractAudioMp3(job.source_uri);
     await log(
       `音声抽出完了 (${formatMB(audio.byteLength)}, ${elapsed(tAudio)})`
     );
@@ -170,10 +161,6 @@ export async function runJob(jobId: string): Promise<void> {
       completed_at: new Date().toISOString(),
     });
     throw e;
-  } finally {
-    if (dlDir) {
-      await rm(dlDir, { recursive: true, force: true }).catch(() => {});
-    }
   }
 }
 

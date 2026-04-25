@@ -5,10 +5,12 @@ import { join } from "node:path";
 import ffmpegStatic from "ffmpeg-static";
 
 /**
- * 動画 (Buffer または既存ファイルパス) から mp3 音声を抽出する。
+ * 動画 (Buffer / ローカルパス / HTTPS URL) から mp3 音声を抽出する。
  * Gemini の音声入力サイズ削減のため 64kbps モノラルに圧縮。
  *
- * 大容量動画はメモリに乗せず path 渡しを推奨。
+ * 大容量 (数GB) は URL 渡しを推奨: ffmpeg が直接ネットワークから
+ * 必要な範囲だけストリーミング読み込みするため /tmp 容量を消費しない。
+ * Vercel Function の /tmp 上限を回避できる。
  */
 export async function extractAudioMp3(
   input: Buffer | string
