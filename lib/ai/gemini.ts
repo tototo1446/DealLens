@@ -11,4 +11,3 @@ export function genai(): GoogleGenAI {
 }
 
 export const MODEL_FLASH = "gemini-2.5-flash";
-export const MODEL_PRO = "gemini-2.5-pro";

@@ -1,4 +1,4 @@
-import { genai, MODEL_FLASH, MODEL_PRO } from "./gemini";
+import { genai, MODEL_FLASH } from "./gemini";
 import { TRANSCRIBE_INSTRUCTION } from "./prompts/transcribe";
 import { buildExtractionPrompt } from "./prompts/extract-categories";
 import { splitAudioMp3 } from "@/lib/ffmpeg/split-audio";
@@ -328,18 +328,40 @@ export async function extractCategories(
   transcript: string
 ): Promise<ExtractionMap> {
   const ai = genai();
-  const result = await ai.models.generateContent({
-    model: MODEL_PRO,
-    contents: [
-      { role: "user", parts: [{ text: buildExtractionPrompt(transcript) }] },
-    ],
-    config: {
-      responseMimeType: "application/json",
-      temperature: 0.2,
-    },
-  });
+  const call = async () => {
+    const result = await ai.models.generateContent({
+      model: MODEL_FLASH,
+      contents: [
+        { role: "user", parts: [{ text: buildExtractionPrompt(transcript) }] },
+      ],
+      config: {
+        responseMimeType: "application/json",
+        temperature: 0.2,
+        // 14項目 × evidence_quote ~120文字 + value で十分な余裕。
+        maxOutputTokens: 32_000,
+        // 50万トークン級の transcript を Pro で処理すると thinking が暴れて
+        // 10分超ハングするため Flash に切り替え。Flash は thinking 0 にできる。
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+    });
+    return result.text ?? "";
+  };
 
-  const parsed = safeParse<{ results: ExtractionMap }>(result.text ?? "", {
+  // 巨大入力で Flash でも稀に hang するため 5分タイムアウト + リトライ1回。
+  let raw = "";
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      raw = await withTimeout(call(), 5 * 60 * 1000, `extractCategories attempt ${attempt}`);
+      break;
+    } catch (e) {
+      lastErr = e;
+      if (attempt === 2) throw lastErr;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+
+  const parsed = safeParse<{ results: ExtractionMap }>(raw, {
     results: {},
   });
   return parsed.results ?? {};
