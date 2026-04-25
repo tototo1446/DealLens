@@ -12,7 +12,6 @@ import { extractAudioMp3 } from "@/lib/ffmpeg/extract-audio";
 import {
   extractCategories,
   transcribeAudioChunked,
-  type ExtractionMap,
 } from "@/lib/ai/pipeline";
 import { upsertExtractionRow } from "@/lib/sheets/upsert";
 
@@ -152,13 +151,47 @@ export async function runJobExtract(jobId: string): Promise<void> {
       `Gemini に 14項目の構造化抽出をリクエスト中… (transcript ${t.full_text.length}文字)`
     );
     const tExt = Date.now();
-    const extracted: ExtractionMap = await extractCategories(t.full_text);
+    const { extracted, diagnostics: extDiag } = await extractCategories(t.full_text);
     const filled = Object.values(extracted).filter(
       (v) => v?.value != null && v.value !== ""
     ).length;
     await log(
       `抽出完了 (${filled}/${Object.keys(extracted).length || 14}項目, ${elapsed(tExt)})`
     );
+
+    // 抽出フェーズの診断情報をログに残す
+    const extDiagParts: string[] = [];
+    if (extDiag.finishReason) extDiagParts.push(`finishReason=${extDiag.finishReason}`);
+    if (extDiag.promptTokens != null) extDiagParts.push(`promptTok=${extDiag.promptTokens}`);
+    if (extDiag.outputTokens != null) extDiagParts.push(`outputTok=${extDiag.outputTokens}`);
+    if (extDiag.thoughtsTokens) extDiagParts.push(`thoughtsTok=${extDiag.thoughtsTokens}`);
+    if (extDiag.totalTokens != null) extDiagParts.push(`totalTok=${extDiag.totalTokens}`);
+    extDiagParts.push(`rawLen=${extDiag.rawTextLength}`);
+    extDiagParts.push(`hasResultsKey=${extDiag.hasResultsKey}`);
+    if (extDiag.blockReason) extDiagParts.push(`blockReason=${extDiag.blockReason}`);
+    if (extDiag.parseError) extDiagParts.push(`parseError=${extDiag.parseError}`);
+    await log(`Gemini 抽出応答メタ: ${extDiagParts.join(", ")}`);
+
+    if (filled === 0) {
+      const reasons: string[] = [];
+      if (extDiag.parseError) reasons.push(`JSONパース失敗(${extDiag.parseError})`);
+      if (extDiag.finishReason && extDiag.finishReason !== "STOP")
+        reasons.push(`finishReason=${extDiag.finishReason}`);
+      if (extDiag.blockReason) reasons.push(`blockReason=${extDiag.blockReason}`);
+      if (extDiag.rawTextLength === 0) reasons.push("空応答");
+      if (extDiag.hasResultsKey === false && extDiag.rawTextLength > 0)
+        reasons.push("results キーが見つからない (スキーマ不一致)");
+      const why = reasons.length > 0 ? ` 原因: ${reasons.join(" / ")}` : "";
+      await appendJobLog(
+        jobId,
+        `抽出結果が空でした。${why}${
+          extDiag.rawTextHead
+            ? ` 応答冒頭: ${truncate(extDiag.rawTextHead, 240)}`
+            : ""
+        }`,
+        "warn"
+      );
+    }
 
     await saveExtractionResults(
       jobId,

@@ -38,6 +38,24 @@ export type ExtractionMap = Record<
   { value: unknown; evidence_quote: string | null; confidence: number | null }
 >;
 
+export type ExtractionDiagnostics = {
+  finishReason?: string;
+  promptTokens?: number;
+  outputTokens?: number;
+  thoughtsTokens?: number;
+  totalTokens?: number;
+  rawTextLength: number;
+  rawTextHead: string;
+  parseError?: string;
+  blockReason?: string;
+  hasResultsKey?: boolean;
+};
+
+export type ExtractionOutcome = {
+  extracted: ExtractionMap;
+  diagnostics: ExtractionDiagnostics;
+};
+
 /**
  * Stage 1: 音声 → 文字起こし + 話者分離
  *
@@ -326,7 +344,7 @@ function aggregateDiagnostics(
  */
 export async function extractCategories(
   transcript: string
-): Promise<ExtractionMap> {
+): Promise<ExtractionOutcome> {
   const ai = genai();
   const call = async () => {
     const result = await ai.models.generateContent({
@@ -344,15 +362,20 @@ export async function extractCategories(
         thinkingConfig: { thinkingBudget: 0 },
       },
     });
-    return result.text ?? "";
+    return result;
   };
 
   // 巨大入力で Flash でも稀に hang するため 5分タイムアウト + リトライ1回。
-  let raw = "";
+  type GenAIResponse = Awaited<ReturnType<typeof call>>;
+  let response: GenAIResponse | null = null;
   let lastErr: unknown;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      raw = await withTimeout(call(), 5 * 60 * 1000, `extractCategories attempt ${attempt}`);
+      response = await withTimeout(
+        call(),
+        5 * 60 * 1000,
+        `extractCategories attempt ${attempt}`
+      );
       break;
     } catch (e) {
       lastErr = e;
@@ -360,11 +383,36 @@ export async function extractCategories(
       await new Promise((r) => setTimeout(r, 2000));
     }
   }
+  if (!response) throw lastErr;
 
-  const parsed = safeParse<{ results: ExtractionMap }>(raw, {
+  const rawText = response.text ?? "";
+  const candidate = response.candidates?.[0];
+  const usage = (response as unknown as { usageMetadata?: Record<string, number> })
+    .usageMetadata;
+  const promptFeedback = (
+    response as unknown as { promptFeedback?: { blockReason?: string } }
+  ).promptFeedback;
+
+  const parsed = safeParseWithError<{ results: ExtractionMap }>(rawText, {
     results: {},
   });
-  return parsed.results ?? {};
+
+  const diagnostics: ExtractionDiagnostics = {
+    finishReason: candidate?.finishReason as string | undefined,
+    promptTokens: usage?.promptTokenCount,
+    outputTokens: usage?.candidatesTokenCount,
+    thoughtsTokens: usage?.thoughtsTokenCount,
+    totalTokens: usage?.totalTokenCount,
+    rawTextLength: rawText.length,
+    rawTextHead: rawText.slice(0, 240),
+    parseError: parsed.error,
+    blockReason: promptFeedback?.blockReason,
+    hasResultsKey: parsed.value && typeof parsed.value === "object"
+      ? "results" in (parsed.value as object)
+      : false,
+  };
+
+  return { extracted: parsed.value.results ?? {}, diagnostics };
 }
 
 function safeParse<T>(text: string, fallback: T): T {
