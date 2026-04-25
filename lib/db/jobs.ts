@@ -247,3 +247,17 @@ export async function saveTranscript(
   });
   if (error) throw error;
 }
+
+export async function getTranscript(
+  jobId: string
+): Promise<{ full_text: string; segments: unknown } | null> {
+  const sb = supabaseAdmin();
+  const { data, error } = await sb
+    .from("transcripts")
+    .select("full_text, segments")
+    .eq("job_id", jobId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  return { full_text: data.full_text as string, segments: data.segments };
+}

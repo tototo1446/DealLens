@@ -3,6 +3,7 @@ import {
   updateJob,
   saveExtractionResults,
   saveTranscript,
+  getTranscript,
   appendJobLog,
   checkCancellation,
   JobCancelledError,
@@ -11,10 +12,18 @@ import { extractAudioMp3 } from "@/lib/ffmpeg/extract-audio";
 import {
   extractCategories,
   transcribeAudioChunked,
+  type ExtractionMap,
 } from "@/lib/ai/pipeline";
 import { upsertExtractionRow } from "@/lib/sheets/upsert";
 
-export async function runJob(jobId: string): Promise<void> {
+/**
+ * Phase A: 動画ソース確認 → 音声抽出 → 文字起こし → transcript を DB に保存
+ *
+ * 完了時に Phase B (/api/worker/extract) を fetch で kick することで、
+ * Vercel Function の maxDuration=800s を独立に消費できる。
+ * 4時間以上の長尺動画でも 1 Function 内で全工程を済ませようとせずに済む。
+ */
+export async function runJobTranscribe(jobId: string): Promise<void> {
   const job = await getJob(jobId);
   if (!job) throw new Error(`job not found: ${jobId}`);
 
@@ -43,15 +52,14 @@ export async function runJob(jobId: string): Promise<void> {
     // 3. 文字起こし
     await checkCancellation(jobId);
     await updateJob(jobId, { status: "analyzing" });
-    await log("Gemini に文字起こしをリクエスト中… (10分ごとにチャンク分割→並列処理)");
+    await log(
+      "Gemini に文字起こしをリクエスト中… (8分ごとにチャンク分割→並列処理)"
+    );
     const tTrans = Date.now();
     const { result: transcript, diagnostics } = await transcribeAudioChunked(
       audio,
       {
-        // 8分単位に分割。10分だと Gemini Flash が出力ループ気味になり最後の
-        // 1チャンクが hang するケースがあったため短くする。
         chunkSec: 480,
-        // 並列度up で長尺動画でも全体時間を抑える。
         concurrency: 5,
         onProgress: (m) => log(m),
       }
@@ -98,11 +106,53 @@ export async function runJob(jobId: string): Promise<void> {
     }
     await saveTranscript(jobId, transcript.full_text, transcript.segments);
 
+    // 4. Phase B (extract) を別 Function として kick する
+    await log("Phase B (カテゴリ抽出+シート書込) を別 Function に引き継ぎます…");
+    await kickExtractPhase(jobId);
+    await log("Phase B を起動しました。残処理は新しい Function に引き継ぎ済みです");
+  } catch (e) {
+    if (e instanceof JobCancelledError) {
+      await appendJobLog(jobId, "ユーザー操作により中断されました", "warn");
+      return;
+    }
+    const message = formatError(e);
+    await appendJobLog(jobId, `エラー: ${message}`, "error");
+    await updateJob(jobId, {
+      status: "failed",
+      error: message,
+      completed_at: new Date().toISOString(),
+    });
+    throw e;
+  }
+}
+
+/**
+ * Phase B: 保存済み transcript を読み込んで → カテゴリ抽出 → シート書込
+ *
+ * /api/worker/extract から after() で呼ばれる。
+ */
+export async function runJobExtract(jobId: string): Promise<void> {
+  const job = await getJob(jobId);
+  if (!job) throw new Error(`job not found: ${jobId}`);
+
+  const log = (message: string) => appendJobLog(jobId, message);
+
+  try {
+    await log("Phase B 開始 (カテゴリ抽出+シート書込)");
+
+    const t = await getTranscript(jobId);
+    if (!t || !t.full_text) {
+      throw new Error("transcript が DB に存在しません。文字起こしの再実行が必要です");
+    }
+
     // 4. カテゴリ抽出
     await checkCancellation(jobId);
-    await log("Gemini に 14項目の構造化抽出をリクエスト中…");
+    await updateJob(jobId, { status: "analyzing" });
+    await log(
+      `Gemini に 14項目の構造化抽出をリクエスト中… (transcript ${t.full_text.length}文字)`
+    );
     const tExt = Date.now();
-    const extracted = await extractCategories(transcript.full_text);
+    const extracted: ExtractionMap = await extractCategories(t.full_text);
     const filled = Object.values(extracted).filter(
       (v) => v?.value != null && v.value !== ""
     ).length;
@@ -121,8 +171,7 @@ export async function runJob(jobId: string): Promise<void> {
     );
     await log("抽出結果を DB に保存しました");
 
-    // 5. シート書き込み (失敗しても DB の抽出結果は残るので、後から再シートできるよう
-    //    詳細エラーをログに残しつつ status=failed で終わらせる)
+    // 5. シート書き込み
     await checkCancellation(jobId);
     await updateJob(jobId, { status: "writing_sheet" });
     const hasGasUrl = !!process.env.GAS_WEB_APP_URL;
@@ -165,6 +214,41 @@ export async function runJob(jobId: string): Promise<void> {
     });
     throw e;
   }
+}
+
+/**
+ * 後方互換: 旧来の単一フェーズ runJob 呼び出し向け。
+ * Phase A を呼ぶだけ (Phase A の最後で Phase B が kick される)。
+ */
+export async function runJob(jobId: string): Promise<void> {
+  await runJobTranscribe(jobId);
+}
+
+async function kickExtractPhase(jobId: string): Promise<void> {
+  const appUrl = appBaseUrl();
+  const token = process.env.INTERNAL_API_TOKEN ?? "";
+  const res = await fetch(`${appUrl}/api/worker/extract`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-internal-token": token,
+    },
+    body: JSON.stringify({ job_id: jobId }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(
+      `Phase B kick failed: HTTP ${res.status} ${res.statusText} ${body.slice(0, 200)}`
+    );
+  }
+}
+
+function appBaseUrl(): string {
+  // 本番では Vercel が設定する固定URLを使う。
+  // request.url や VERCEL_URL は deployment 固有URLになるので避ける。
+  const prodHost = process.env.VERCEL_PROJECT_PRODUCTION_URL;
+  if (prodHost) return `https://${prodHost}`;
+  return process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 }
 
 function formatError(e: unknown): string {
