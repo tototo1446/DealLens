@@ -1,5 +1,5 @@
 /**
- * 抽出カテゴリー定義（先方カテゴリー表が到着次第ここを差し替える）
+ * 顧客情報シートに転記する抽出カテゴリー定義
  *
  * key:    シート列名・抽出キーとして使う英数字スネークケース
  * label:  画面表示・スプレッドシートヘッダー
@@ -18,83 +18,96 @@ export type CategoryDef = {
   description: string;
 };
 
-export const INDUSTRIES: string[] = [
-  "製造業",
-  "小売・EC",
-  "金融・保険",
-  "医療・ヘルスケア",
-  "不動産・建設",
-  "教育",
-  "IT・SaaS",
-  "広告・マーケティング",
-  "人材・HR",
-  "公共・自治体",
-  "その他",
-];
+export const SHEET_TITLE = "顧客情報シート";
 
 export const CATEGORIES: CategoryDef[] = [
   {
-    key: "company_name",
-    label: "会社名",
+    key: "name",
+    label: "名前",
     type: "text",
-    description: "顧客企業の正式社名。明示的に発話されたものを抽出する。",
-  },
-  {
-    key: "company_size",
-    label: "企業規模",
-    type: "enum",
-    options: ["〜50名", "50〜300名", "300〜1000名", "1000名以上", "不明"],
-    description: "従業員数のレンジを推定する。発話されていなければ「不明」。",
-  },
-  {
-    key: "decision_maker",
-    label: "意思決定者",
-    type: "text",
-    description: "今回の案件の意思決定権者の役職・部署名。",
-  },
-  {
-    key: "current_pain",
-    label: "現状の課題",
-    type: "text",
-    description: "顧客が口にした業務上の課題・困りごと。複数あれば箇条書きで。",
-  },
-  {
-    key: "ai_use_case",
-    label: "想定AI活用シーン",
-    type: "text",
-    description: "顧客が想定している/興味を示したAI活用ユースケース。",
-  },
-  {
-    key: "budget_range",
-    label: "予算感",
-    type: "enum",
-    options: ["〜50万", "50〜200万", "200〜500万", "500万〜", "未確認"],
-    description: "顧客が口にした予算規模、または間接的に示唆された範囲。",
-  },
-  {
-    key: "deployment_timing",
-    label: "導入希望時期",
-    type: "text",
-    description: "導入希望時期。年月や四半期で具体的に。",
-  },
-  {
-    key: "competitors_mentioned",
-    label: "言及された他社・競合",
-    type: "text",
-    description: "比較検討中の他社サービス名、または以前検討した製品名。",
-  },
-  {
-    key: "next_action",
-    label: "次回ネクストアクション",
-    type: "text",
-    description: "商談クロージング時に合意されたネクストアクション。",
-  },
-  {
-    key: "deal_temperature",
-    label: "案件温度感",
-    type: "enum",
-    options: ["熱い", "中", "低い", "判断不能"],
     description:
-      "顧客の前向き度合いを発話のニュアンス・質問の具体性から判定する。",
+      "顧客本人の氏名を必ず『姓 名』のフルネーム + カタカナ表記で抽出する (例: イシカワ マイ)。" +
+      "動画内では自己紹介でフルネームが述べられている前提。漢字が分かっていてもカタカナで出力すること (実際の表記が異なる可能性があるため)。" +
+      "姓と名の間は半角スペース1つで区切る。" +
+      "発話に含まれる読み仮名・名乗りからカタカナ化する。" +
+      "姓のみ・名のみしか言及されていない場合は value を null にする (フルネームでない部分推定はしない)。",
+  },
+  {
+    key: "age",
+    label: "年齢",
+    type: "text",
+    description: "顧客の年齢。数値または「30代前半」などのレンジでも可。明示的に語られた情報のみ。",
+  },
+  {
+    key: "occupation",
+    label: "職業",
+    type: "text",
+    description: "顧客の職業・職種・業務内容。会社員/主婦/学生など含む。",
+  },
+  {
+    key: "discovery_channel",
+    label: "いつ私のことを知ったか／キッカケ",
+    type: "text",
+    description: "顧客が相手(セールスマン/相談者)をいつ・どこで知ったか、接点のキッカケ。SNS・紹介・広告など。",
+  },
+  {
+    key: "pain_points",
+    label: "顧客の悩み・課題",
+    type: "text",
+    description: "顧客が抱えている悩み・課題。過去の失敗経験・背景も含めて具体的に。箇条書き可。",
+  },
+  {
+    key: "ideal_goal",
+    label: "理想・ゴール",
+    type: "text",
+    description: "顧客が望む未来像、理想のゴール・状態。どうなりたいか。",
+  },
+  {
+    key: "gap",
+    label: "悩みと理想のギャップ",
+    type: "text",
+    description: "現状の悩みと理想のゴールの間にあるギャップ。何が足りていないのか。",
+  },
+  {
+    key: "impressive_phrases",
+    label: "印象的なフレーズ・感情がこもった言葉",
+    type: "text",
+    description: "顧客の発話で特に印象的なフレーズや感情が強く乗った言葉を原文に近い形で引用する。",
+  },
+  {
+    key: "daily_behavior",
+    label: "日常行動・生活背景",
+    type: "text",
+    description: "日常の時間の使い方、生活習慣、SNSの使い方・情報収集の仕方など、行動パターン。",
+  },
+  {
+    key: "blockers",
+    label: "行動を阻んでいる不安や理由",
+    type: "text",
+    description: "理想のゴールに向けて行動できない/踏み出せない不安・ブレーキ・心理的障壁。",
+  },
+  {
+    key: "best_reactions",
+    label: "相談中に最も反応が良かった話題・言葉",
+    type: "text",
+    description: "会話の中で顧客の反応が最も良かった話題・フレーズ・提案。共感や前のめりが見られた箇所。",
+  },
+  {
+    key: "post_session_feeling",
+    label: "相談後の感想・気持ちの変化",
+    type: "text",
+    description: "相談・商談の最後に顧客が述べた感想、気持ちの変化、ビフォーアフター。",
+  },
+  {
+    key: "salesman_approach",
+    label: "セールスマンのアプローチ",
+    type: "text",
+    description: "セールスマン/相談担当者が取ったアプローチ手法の要約。論理訴求/共感ベース/体験提案などの型や具体的な働きかけ。",
+  },
+  {
+    key: "approach_evaluation",
+    label: "悩みに対するアプローチ評価",
+    type: "text",
+    description: "セールスマンのアプローチが顧客の悩みにどれだけフィットしていたか、効果・改善点を含めた評価。",
   },
 ];

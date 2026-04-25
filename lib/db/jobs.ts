@@ -7,9 +7,28 @@ export type JobStatus =
   | "analyzing"
   | "writing_sheet"
   | "done"
-  | "failed";
+  | "failed"
+  | "cancelling"
+  | "cancelled";
 
-export type SourceType = "upload" | "drive_url" | "gigafile";
+export type LogLevel = "info" | "warn" | "error";
+
+export type JobLog = {
+  id: string;
+  job_id: string;
+  level: LogLevel;
+  message: string;
+  created_at: string;
+};
+
+export class JobCancelledError extends Error {
+  constructor() {
+    super("job cancelled");
+    this.name = "JobCancelledError";
+  }
+}
+
+export type SourceType = "upload";
 
 export type AnalysisJob = {
   id: string;
@@ -23,6 +42,7 @@ export type AnalysisJob = {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  cancel_requested: boolean;
 };
 
 export type ExtractionResult = {
@@ -133,6 +153,85 @@ export async function getExtractionResults(
     .eq("job_id", jobId);
   if (error) throw error;
   return (data ?? []) as ExtractionResult[];
+}
+
+export async function appendJobLog(
+  jobId: string,
+  message: string,
+  level: LogLevel = "info"
+): Promise<void> {
+  const sb = supabaseAdmin();
+  const { error } = await sb
+    .from("job_logs")
+    .insert({ job_id: jobId, level, message });
+  if (error) {
+    // ログ失敗は本体処理を止めない
+    console.warn("[appendJobLog] insert failed:", error);
+    return;
+  }
+  console.log(`[job:${jobId}] [${level}] ${message}`);
+}
+
+export async function getJobLogs(jobId: string): Promise<JobLog[]> {
+  const sb = supabaseAdmin();
+  const { data, error } = await sb
+    .from("job_logs")
+    .select("*")
+    .eq("job_id", jobId)
+    .order("created_at", { ascending: true })
+    .limit(1000);
+  if (error) throw error;
+  return (data ?? []) as JobLog[];
+}
+
+export async function requestCancel(jobId: string): Promise<void> {
+  const sb = supabaseAdmin();
+  const now = new Date().toISOString();
+  // 中断可能な状態なら即座に cancelled にしてしまう。
+  // 並行して worker が動いていても、次のチェックポイントで JobCancelledError になって安全に抜ける。
+  const { error } = await sb
+    .from("analysis_jobs")
+    .update({
+      cancel_requested: true,
+      status: "cancelled",
+      completed_at: now,
+      updated_at: now,
+    })
+    .eq("id", jobId)
+    .in("status", [
+      "queued",
+      "downloading",
+      "transcoding",
+      "analyzing",
+      "writing_sheet",
+      "cancelling",
+    ]);
+  if (error) throw error;
+}
+
+/**
+ * cancel_requested が true ならキャンセル状態に遷移させて throw する。
+ * worker の各チェックポイントで呼び出す。
+ */
+export async function checkCancellation(jobId: string): Promise<void> {
+  const sb = supabaseAdmin();
+  const { data, error } = await sb
+    .from("analysis_jobs")
+    .select("cancel_requested")
+    .eq("id", jobId)
+    .maybeSingle();
+  if (error) throw error;
+  if (data?.cancel_requested) {
+    await sb
+      .from("analysis_jobs")
+      .update({
+        status: "cancelled",
+        completed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", jobId);
+    throw new JobCancelledError();
+  }
 }
 
 export async function saveTranscript(

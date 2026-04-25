@@ -33,16 +33,40 @@ export async function callGas<TPayload = unknown, TResult = unknown>(
   payload?: TPayload
 ): Promise<GasResponse<TResult>> {
   const { url, secret } = env();
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action, secret, payload }),
-    redirect: "follow",
-  });
-  if (!res.ok) {
-    throw new Error(`GAS request failed: ${res.status} ${res.statusText}`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60_000);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, secret, payload }),
+      redirect: "follow",
+      signal: controller.signal,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`GAS fetch failed: ${msg}`);
+  } finally {
+    clearTimeout(timeout);
   }
-  const json = (await res.json()) as GasResponse<TResult>;
+
+  const bodyText = await res.text().catch(() => "");
+  if (!res.ok) {
+    throw new Error(
+      `GAS HTTP ${res.status} ${res.statusText}: ${bodyText.slice(0, 300)}`
+    );
+  }
+
+  let json: GasResponse<TResult>;
+  try {
+    json = JSON.parse(bodyText) as GasResponse<TResult>;
+  } catch {
+    // GAS Web App は認可エラー時に HTML を返してくることがある
+    throw new Error(
+      `GAS response is not JSON (HTTP ${res.status}): ${bodyText.slice(0, 300)}`
+    );
+  }
   if (!json.ok) {
     throw new Error(`GAS action "${action}" failed: ${json.error ?? "unknown"}`);
   }

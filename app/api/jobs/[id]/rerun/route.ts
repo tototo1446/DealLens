@@ -1,7 +1,9 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { getJob, updateJob } from "@/lib/db/jobs";
+import { runJob } from "@/lib/worker/run-job";
 
 export const runtime = "nodejs";
+export const maxDuration = 800;
 
 export async function POST(
   _req: Request,
@@ -13,16 +15,13 @@ export async function POST(
 
   await updateJob(id, { status: "queued", error: null });
 
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
-  const token = process.env.INTERNAL_API_TOKEN ?? "";
-  fetch(`${appUrl}/api/worker/process`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-internal-token": token,
-    },
-    body: JSON.stringify({ job_id: id }),
-  }).catch(() => {});
+  after(async () => {
+    try {
+      await runJob(id);
+    } catch (e) {
+      console.error("[api/jobs/rerun] runJob failed", id, e);
+    }
+  });
 
   return NextResponse.json({ ok: true });
 }
