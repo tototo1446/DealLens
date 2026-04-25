@@ -269,8 +269,10 @@ function Stepper({
   return (
     <ol className="flex items-start">
       {STEPS.map((step, i) => {
-        const isDone = !failed && i < currentStep;
-        const isCurrent = !failed && i === currentStep;
+        const isLast = i === STEPS.length - 1;
+        const isDone =
+          !failed && (i < currentStep || (isLast && i === currentStep));
+        const isCurrent = !failed && i === currentStep && !isDone;
         const markerClass = isDone
           ? "bg-success text-white border-success"
           : failed && i <= currentStep
