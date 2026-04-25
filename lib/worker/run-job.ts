@@ -7,8 +7,9 @@ import {
   checkCancellation,
   JobCancelledError,
 } from "@/lib/db/jobs";
-import { downloadAsBuffer } from "@/lib/storage/blob";
+import { downloadToTempFile } from "@/lib/storage/blob";
 import { extractAudioMp3 } from "@/lib/ffmpeg/extract-audio";
+import { rm } from "node:fs/promises";
 import {
   extractCategories,
   transcribeAudioChunked,
@@ -22,25 +23,28 @@ export async function runJob(jobId: string): Promise<void> {
   const log = (message: string) => appendJobLog(jobId, message);
   const logWarn = (message: string) => appendJobLog(jobId, message, "warn");
 
+  // 大容量動画 (~数GB) は arrayBuffer() で読むとメモリ上限を超えるため、
+  // 一時ファイルにストリーミング保存してから ffmpeg にパス渡しする。
+  let dlDir: string | null = null;
+
   try {
     await log(`ジョブ開始 (source: ${job.source_type})`);
 
-    // 1. ダウンロード
+    // 1. ダウンロード (ストリーミング → tmpfile)
     await checkCancellation(jobId);
     await updateJob(jobId, { status: "downloading" });
     await log(`動画の取得を開始: ${truncate(job.source_uri, 80)}`);
     const tDl = Date.now();
-    const videoBuffer = await downloadAsBuffer(job.source_uri);
-    await log(
-      `動画の取得完了 (${formatMB(videoBuffer.byteLength)}, ${elapsed(tDl)})`
-    );
+    const dl = await downloadToTempFile(job.source_uri);
+    dlDir = dl.dir;
+    await log(`動画の取得完了 (${formatMB(dl.bytes)}, ${elapsed(tDl)})`);
 
     // 2. 音声抽出
     await checkCancellation(jobId);
     await updateJob(jobId, { status: "transcoding" });
     await log("ffmpegで音声(mp3)を抽出中…");
     const tAudio = Date.now();
-    const audio = await extractAudioMp3(videoBuffer);
+    const audio = await extractAudioMp3(dl.path);
     await log(
       `音声抽出完了 (${formatMB(audio.byteLength)}, ${elapsed(tAudio)})`
     );
@@ -166,6 +170,10 @@ export async function runJob(jobId: string): Promise<void> {
       completed_at: new Date().toISOString(),
     });
     throw e;
+  } finally {
+    if (dlDir) {
+      await rm(dlDir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 }
 
