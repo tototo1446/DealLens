@@ -179,7 +179,16 @@ export async function transcribeAudioChunked(
       const i = nextIndex++;
       if (i >= chunks.length) return;
       const ch = chunks[i];
-      const outcome = await transcribeAudio(ch.buffer);
+      const outcome = await transcribeChunkWithRetry(ch.buffer, {
+        attempts: 2,
+        timeoutMs: 8 * 60 * 1000, // 8 min
+        onAttemptFail: async (attempt, err) => {
+          if (onProgress)
+            await onProgress(
+              `チャンク idx=${i} 試行${attempt}失敗 → リトライします: ${err}`
+            );
+        },
+      });
       results[i] = { index: i, startSec: ch.startSec, outcome };
       completed++;
       if (onProgress)
@@ -221,6 +230,51 @@ export async function transcribeAudioChunked(
     result: { segments: allSegments, full_text },
     diagnostics: diag,
   };
+}
+
+/**
+ * 1チャンクの文字起こしをタイムアウト付きで実行し、失敗時はリトライする。
+ * Gemini Flash がループや hang で return しないケース対策。
+ */
+async function transcribeChunkWithRetry(
+  buffer: Buffer,
+  opts: {
+    attempts: number;
+    timeoutMs: number;
+    onAttemptFail?: (attempt: number, err: string) => Promise<void> | void;
+  }
+): Promise<TranscriptOutcome> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= opts.attempts; attempt++) {
+    try {
+      return await withTimeout(
+        transcribeAudio(buffer),
+        opts.timeoutMs,
+        `chunk transcribe attempt ${attempt}`
+      );
+    } catch (e) {
+      lastErr = e;
+      const msg = e instanceof Error ? e.message : String(e);
+      if (attempt < opts.attempts) {
+        if (opts.onAttemptFail) await opts.onAttemptFail(attempt, msg);
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timeout after ${ms}ms`)),
+      ms
+    );
+  });
+  return Promise.race([p, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  }) as Promise<T>;
 }
 
 function shiftMmSs(mmss: string, offsetSec: number): string {

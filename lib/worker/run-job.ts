@@ -48,8 +48,11 @@ export async function runJob(jobId: string): Promise<void> {
     const { result: transcript, diagnostics } = await transcribeAudioChunked(
       audio,
       {
-        chunkSec: 600,
-        concurrency: 3,
+        // 8分単位に分割。10分だと Gemini Flash が出力ループ気味になり最後の
+        // 1チャンクが hang するケースがあったため短くする。
+        chunkSec: 480,
+        // 並列度up で長尺動画でも全体時間を抑える。
+        concurrency: 5,
         onProgress: (m) => log(m),
       }
     );
